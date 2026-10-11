@@ -1,6 +1,9 @@
 package isobox
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -69,4 +72,39 @@ func containsString(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+func TestLinkLinuxViewTopLevelSymlinks(t *testing.T) {
+	host := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(host, "usr", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"bin", "sbin", "lib"} {
+		if err := os.Symlink("usr/"+name, filepath.Join(host, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := linuxTopLevelSymlinkCandidates
+	t.Cleanup(func() { linuxTopLevelSymlinkCandidates = old })
+	linuxTopLevelSymlinkCandidates = []string{filepath.Join(host, "bin"), filepath.Join(host, "sbin"), filepath.Join(host, "lib")}
+
+	usr, _ := filepath.EvalSymlinks(filepath.Join(host, "usr"))
+	rootfs := t.TempDir()
+	parent := filepath.Join(rootfs, strings.TrimPrefix(host, "/"))
+	if err := os.MkdirAll(filepath.Join(parent, "lib"), 0o755); err != nil { // already in the view
+		t.Fatal(err)
+	}
+	mounts := []linuxViewMount{{Source: filepath.Join(usr, "bin"), Target: filepath.Join(usr, "bin"), Mode: linuxViewMountReadOnly}}
+	if err := linkLinuxViewTopLevelSymlinks(rootfs, mounts); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.Readlink(filepath.Join(parent, "bin")); err != nil || got != "usr/bin" {
+		t.Errorf("bin: %q %v, want a usr/bin link (its target is mounted)", got, err)
+	}
+	if _, err := os.Lstat(filepath.Join(parent, "sbin")); err == nil {
+		t.Error("sbin linked although usr/sbin is not in the view")
+	}
+	if fi, err := os.Lstat(filepath.Join(parent, "lib")); err != nil || fi.Mode()&os.ModeSymlink != 0 {
+		t.Errorf("lib: an existing view path must be kept: %v %v", fi, err)
+	}
 }

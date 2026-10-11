@@ -100,6 +100,9 @@ func prepareGvisorOCIFilesystemView(s Spec, view linuxNamespaceView) (rootfs str
 			}
 			mounts = append(mounts, linuxViewOCIMount(m))
 		}
+		if err := linkLinuxViewTopLevelSymlinks(rootfs, mountSpecs); err != nil {
+			return "", nil, nil, err
+		}
 	}
 
 	if len(view.ReadDeny) > 0 {
@@ -386,6 +389,47 @@ func pathInLinuxScope(path string, scopes []string) bool {
 			return true
 		}
 		if strings.HasPrefix(clean, scope+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// linuxTopLevelSymlinkCandidates are the top-level directories usrmerge
+// distributions (Debian, Ubuntu, Fedora, Arch) make symlinks into /usr.
+var linuxTopLevelSymlinkCandidates = []string{"/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32"}
+
+// linkLinuxViewTopLevelSymlinks recreates the host's top-level symlinks
+// (/bin -> usr/bin on usrmerge hosts) in a scoped-read rootfs whose mounts
+// expose their targets. Readable paths are canonicalized, so a readable /usr
+// shows up as /usr only: without /bin, "#!/bin/sh" scripts cannot start. A
+// link is added only when its target is inside a mount, and never over a
+// path the view already has (/lib is a runtime mount of its own).
+func linkLinuxViewTopLevelSymlinks(rootfs string, mounts []linuxViewMount) error {
+	for _, top := range linuxTopLevelSymlinkCandidates {
+		link, err := os.Readlink(top)
+		if err != nil {
+			continue // not a symlink here
+		}
+		resolved, err := filepath.EvalSymlinks(top)
+		if err != nil || !linuxViewMountsCover(mounts, resolved) {
+			continue
+		}
+		dst := filepath.Join(rootfs, strings.TrimPrefix(top, "/"))
+		if _, err := os.Lstat(dst); err == nil {
+			continue
+		}
+		if err := os.Symlink(link, dst); err != nil {
+			return fmt.Errorf("isobox: linking %s in filesystem view: %w", top, err)
+		}
+	}
+	return nil
+}
+
+func linuxViewMountsCover(mounts []linuxViewMount, p string) bool {
+	for _, m := range mounts {
+		src := linuxPathClean(m.Source)
+		if p == src || strings.HasPrefix(p, strings.TrimSuffix(src, "/")+"/") {
 			return true
 		}
 	}
